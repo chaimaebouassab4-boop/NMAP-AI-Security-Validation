@@ -1,0 +1,109 @@
+{
+  "metadata": {
+    "version": "2.0",
+    "schema_version": "1.0",
+    "timestamp": "2025-12-07T18:57:54.867923Z",
+    "validator": "NMAP-AI-Security-Validation"
+  },
+  "command": {
+    "raw": "nmap -sV scanme.nmap.org",
+    "parsed": {
+      "executable": "nmap",
+      "flags": [
+        "-sV"
+      ],
+      "targets": [
+        "scanme.nmap.org"
+      ]
+    },
+    "valid": true
+  },
+  "validation": {
+    "status": "passed",
+    "syntax_check": "OK",
+    "error": null
+  },
+  "scores": {
+    "overall_score": 90,
+    "risk_score": 10,
+    "safety_score": 90,
+    "compliance_score": 100.0,
+    "confidence_score": 95.0,
+    "breakdown": {
+      "command_structure": 100,
+      "flag_safety": 100,
+      "target_safety": 100,
+      "execution_safety": 90
+    }
+  },
+  "risk_assessment": {
+    "level": "low",
+    "score": 10,
+    "factors": [
+      "warning_flags"
+    ],
+    "recommendation": "ALLOW: Command appears safe to execute."
+  },
+  "compliance": {
+    "status": "compliant",
+    "checks_passed": 2,
+    "checks_failed": 0,
+    "violations": [],
+    "advisories": [
+      {
+        "type": "warning_flag",
+        "item": "-sV",
+        "reason": "Service version detection",
+        "severity": "warning"
+      }
+    ]
+  },
+  "findings": {
+    "forbidden_flags": {
+      "found": false,
+      "count": 0,
+      "details": []
+    },
+    "warning_flags": {
+      "found": true,
+      "count": 1,
+      "details": [
+        {
+          "flag": "-sV",
+          "reason": "Service version detection",
+          "severity": "warning"
+        }
+      ]
+    },
+    "target_validation": {
+      "safe_targets": [
+        {
+          "target": "scanme.nmap.org",
+          "status": "safe_test_target"
+        }
+      ],
+      "unsafe_targets": [],
+      "has_unsafe": false
+    }
+  },
+  "recommendations": [
+    {
+      "priority": "medium",
+      "category": "warnings",
+      "message": "Command uses aggressive scan options",
+      "action": "Review the necessity of aggressive flags and ensure proper authorization",
+      "impact": "medium"
+    },
+    {
+      "priority": "low",
+      "category": "best_practice",
+      "message": "Command appears safe",
+      "action": "Proceed with execution in appropriate environment",
+      "impact": "low"
+    }
+  ],
+  "execution": {
+    "performed": false,
+    "mode": "validation_only"
+  }
+}

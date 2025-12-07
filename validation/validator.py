@@ -19,6 +19,8 @@ def validate_nmap_command(cmd: str, execute_real=False, timeout=60, apply_securi
     
     # Strip whitespace
     cmd = cmd.strip()
+    if len(parts) == 0 or parts[0] != "nmap":
+        return {"valid": False, "error": "Command must start with 'nmap'."}
     
     # Check if command starts with "nmap"
     if not cmd.startswith("nmap"):
@@ -27,6 +29,7 @@ def validate_nmap_command(cmd: str, execute_real=False, timeout=60, apply_securi
             "error": "Command must start with 'nmap'.",
             "severity": "high"
         }
+    
     
     # Check for dangerous characters (command injection prevention)
     dangerous_chars = [';', '&', '|', '`', '$', '(', ')', '<', '>', '\n', '\r']
@@ -49,9 +52,8 @@ def validate_nmap_command(cmd: str, execute_real=False, timeout=60, apply_securi
     
     # Parse flags for additional validation
     parts = cmd.split()
-    flags = [p for p in parts if p.startswith('-')]
-    targets = [p for p in parts if not p.startswith('-') and p != 'nmap']
-    
+    flags = [p for p in parts[1:] if p.startswith("-")]
+    targets = [p for p in parts[1:] if not p.startswith("-")]
     # Validate targets (at least one target required)
     if not targets:
         return {
