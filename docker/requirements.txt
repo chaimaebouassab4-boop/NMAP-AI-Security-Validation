@@ -1,0 +1,9 @@
+# Python dependencies for NMAP-AI sandbox
+#✔ Validate JSON structure of commands ✔ Build safe input validation
+
+
+jsonschema==4.25.1
+
+#✔ Helps manage time-based fields
+
+python-dateutil==2.9.0.post0
