@@ -1,11 +1,4 @@
-# Save this as: validation/validation_v2.py
 
-"""
-Validation v2 - Complete NMAP Command Validation System
-========================================================
-Comprehensive validation system combining syntax checking, security rules,
-risk scoring, and structured JSON output.
-"""
 
 import json
 import sys
