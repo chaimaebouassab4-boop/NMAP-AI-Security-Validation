@@ -2,7 +2,7 @@ import re
 import shlex
 import subprocess
 import shutil
-from security_rules import SecurityRules
+from .security_rules import SecurityRules
 
 
 def validate_nmap_command(cmd: str, execute_real=False, timeout=60, apply_security_rules=True):

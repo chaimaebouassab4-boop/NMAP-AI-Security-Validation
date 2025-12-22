@@ -153,20 +153,56 @@ async def repair_command(query: UserQuery, candidate: CommandCandidate, result: 
     """
     # Build a plain text view of issues
     issue_text = " ".join([i.message for i in result.issues]) if result.issues else ""
-    new_command = candidate.command
+    new_command = candidate.command or ""
 
-    if "Permission Error" in issue_text or "-sS" in (candidate.command or ""):
+    # Heuristic complexity scoring
+    tokens = new_command.split()
+    num_flags = sum(1 for t in tokens if t.startswith('-') and len(t) > 1)
+    has_pipes = '|' in new_command or ';' in new_command
+    long_command = len(tokens) > 10
+    complexity_score = num_flags + (2 if has_pipes else 0) + (1 if long_command else 0)
+
+    # Self-correction: Permission Error => switch scan type
+    if "Permission Error" in issue_text or "-sS" in new_command:
         new_command = new_command.replace("-sS", "-sT")
         repair_rationale = "Privilege issue detected. Switched to TCP Connect scan (-sT)."
     else:
         repair_rationale = f"Refined command to address: {issue_text or 'no specific issues'}"
+
+    # Decide whether to ask generator (M1/M3) to change strategy
+    suggested_generation = None
+    # Build generation metadata including previous agent and risk level so orchestrator can act
+    prev_agent = None
+    if candidate.context and isinstance(candidate.context, dict) and "previous_agent" in candidate.context:
+        prev_agent = candidate.context.get("previous_agent")
+    elif query and getattr(query, "metadata", None) and isinstance(query.metadata, dict) and "previous_agent" in query.metadata:
+        prev_agent = query.metadata.get("previous_agent")
+    else:
+        prev_agent = "DIFFUSION"
+
+    generation_metadata = {
+        "complexity_score": complexity_score,
+        "reason": None,
+        "previous_agent": prev_agent,
+        "risk_level": getattr(result, "risk_level", "unknown")
+    }
+
+    # If complexity or high risk, suggest simpler, more deterministic generator (SLM)
+    if complexity_score >= 5 or getattr(result, "risk_level", None) in ["high", "critical"]:
+        suggested_generation = "SLM"
+        generation_metadata["reason"] = "High complexity or risk; prefer simpler, more deterministic generation."
+    else:
+        suggested_generation = "Diffusion"
+        generation_metadata["reason"] = "Command repair straightforward; keep high-capacity generation."
 
     return CommandCandidate(
         command=new_command,
         rationale=repair_rationale,
         source_agent="SELF-CORR",
         user_id=candidate.user_id,
-        context=candidate.context
+        context=candidate.context,
+        suggested_generation=suggested_generation,
+        generation_metadata=generation_metadata
     )
 
 @router.get("/stats")

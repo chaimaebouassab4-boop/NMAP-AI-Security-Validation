@@ -16,6 +16,9 @@ class CommandCandidate(BaseModel):
     # Fields used/returned by agents
     rationale: Optional[str] = Field(None, description="Rationale for any automated change")
     source_agent: Optional[str] = Field(None, description="Agent that produced/modified this candidate")
+    # Guidance for generator agents (e.g., M1/M3)
+    suggested_generation: Optional[str] = Field(None, description="Suggested generation strategy (e.g., 'Diffusion' or 'SLM')")
+    generation_metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata to guide generator adjustments, e.g., {'reason':..., 'complexity_score':...}")
 
 class ValidationIssue(BaseModel):
     """Represents a validation issue."""

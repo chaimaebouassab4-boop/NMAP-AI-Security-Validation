@@ -5,8 +5,8 @@ import sys
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
-from validator import validate_nmap_command, get_validation_summary
-from json_scorer import ValidationScorer
+from validation.validator import validate_nmap_command, get_validation_summary
+from validation.json_scorer import ValidationScorer
 
 
 class ValidationV2:
