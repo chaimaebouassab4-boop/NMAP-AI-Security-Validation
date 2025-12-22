@@ -87,17 +87,22 @@ pip install -r requirements.txt
 
 ### Usage
 
-```bash
-# Run syntax validation
-python syntax_checker.py --command "nmap -sV 192.168.1.1"
+## 🌐 API Usage
 
-# Run full validation with safety checks
-python validate.py --command "nmap -sV 192.168.1.1"
+### Start the API
+\`\`\`bash
+python -m uvicorn api.main:app --reload
+\`\`\`
 
-# Execute in sandbox
-python execute_sandbox.py --command "nmap -sV 192.168.1.1"
-```
+### Access Swagger UI
+Open browser: http://localhost:8000/docs
 
+### Example Request
+\`\`\`bash
+curl -X POST "http://localhost:8000/api/v1/validate" \
+  -H "Content-Type: application/json" \
+  -d '{"command": "nmap -sV scanme.nmap.org"}'
+\`\`\`
 ---
 
 ## 📊 Success Metrics

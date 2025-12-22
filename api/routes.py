@@ -14,14 +14,10 @@ from .models import (
     HealthResponse
 )
 from datetime import datetime
-import sys
 import os
 
-# Add validation directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'validation'))
-
-from validation_v2 import ValidationV2
-from security_rules import SecurityRules
+from validation.validation_v2 import ValidationV2
+from validation.security_rules import SecurityRules
 
 # Create router
 router = APIRouter()
@@ -68,17 +64,30 @@ def convert_to_validation_result(internal_result: dict) -> ValidationResult:
     if internal_result.get('warnings'):
         warnings = internal_result['warnings'] if isinstance(internal_result['warnings'], list) else [internal_result['warnings']]
     
+    # 🔧 FIX: Get risk_score and risk_level from security analysis
+    risk_score = 0
+    risk_level = "unknown"
+    recommendation = "No recommendation"
+    
+    if 'security' in internal_result:
+        risk_score = internal_result['security'].get('risk_score', 0)
+        risk_level = internal_result['security'].get('risk_level', 'unknown')
+        recommendation = internal_result['security'].get('recommendation', 'No recommendation')
+    elif internal_result.get('risk_score') is not None:
+        risk_score = internal_result.get('risk_score', 0)
+        risk_level = internal_result.get('risk_level', 'unknown')
+        recommendation = internal_result.get('recommendation', 'No recommendation')
+    
     return ValidationResult(
         status=status,
         command=internal_result.get('command', ''),
         valid=internal_result.get('valid', False),
-        risk_score=internal_result.get('risk_score', 0),
-        risk_level=internal_result.get('risk_level', 'unknown'),
+        risk_score=risk_score,
+        risk_level=risk_level,
         issues=issues,
         warnings=warnings,
-        recommendation=internal_result.get('recommendation', 'No recommendation')
+        recommendation=recommendation
     )
-
 @router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint."""
