@@ -13,6 +13,9 @@ class CommandCandidate(BaseModel):
     command: str = Field(..., description="NMAP command to validate", example="nmap -sV scanme.nmap.org")
     user_id: Optional[str] = Field(None, description="Optional user identifier")
     context: Optional[Dict[str, Any]] = Field(None, description="Additional context")
+    # Fields used/returned by agents
+    rationale: Optional[str] = Field(None, description="Rationale for any automated change")
+    source_agent: Optional[str] = Field(None, description="Agent that produced/modified this candidate")
 
 class ValidationIssue(BaseModel):
     """Represents a validation issue."""
@@ -32,6 +35,13 @@ class ValidationResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     recommendation: str = Field(..., description="Overall recommendation")
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+
+class UserQuery(BaseModel):
+    """Model representing the user's original query/context for self-correction."""
+    user_id: Optional[str] = Field(None, description="Optional user identifier")
+    query: Optional[str] = Field(None, description="User's textual query or intent")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
 
 class BatchValidationRequest(BaseModel):
     """Request model for batch validation."""

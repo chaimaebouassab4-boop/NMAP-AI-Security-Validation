@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from .models import (
     CommandCandidate, 
     ValidationResult, 
+    UserQuery,
     ValidationIssue,
     BatchValidationRequest, 
     BatchValidationResponse,
@@ -142,6 +143,31 @@ async def get_security_rules():
         "unsafe_ranges": rules.UNSAFE_RANGES,
         "safe_test_targets": rules.SAFE_TEST_TARGETS
     }
+
+
+@router.post("/repair", response_model=CommandCandidate)
+async def repair_command(query: UserQuery, candidate: CommandCandidate, result: ValidationResult):
+    """
+    Agent 7: Self-Correction logic.
+    Refines the command based on validation issues found in Step 4.
+    """
+    # Build a plain text view of issues
+    issue_text = " ".join([i.message for i in result.issues]) if result.issues else ""
+    new_command = candidate.command
+
+    if "Permission Error" in issue_text or "-sS" in (candidate.command or ""):
+        new_command = new_command.replace("-sS", "-sT")
+        repair_rationale = "Privilege issue detected. Switched to TCP Connect scan (-sT)."
+    else:
+        repair_rationale = f"Refined command to address: {issue_text or 'no specific issues'}"
+
+    return CommandCandidate(
+        command=new_command,
+        rationale=repair_rationale,
+        source_agent="SELF-CORR",
+        user_id=candidate.user_id,
+        context=candidate.context
+    )
 
 @router.get("/stats")
 async def get_statistics():
