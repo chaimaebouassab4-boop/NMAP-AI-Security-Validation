@@ -46,8 +46,8 @@ async def startup_event():
     print("="*80)
     print("🚀 NMAP AI Security Validation API Starting...")
     print("="*80)
-    print(f"📚 Swagger UI: http://localhost:8000/docs")
-    print(f"📖 ReDoc: http://localhost:8000/redoc")
+    print(f"📚 Swagger UI: http://localhost:8004/docs")
+    print(f"📖 ReDoc: http://localhost:8004/redoc")
     print("="*80)
 
 @app.on_event("shutdown")
@@ -57,4 +57,4 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api.main:app", host="0.0.0.0", port=8004, reload=True)

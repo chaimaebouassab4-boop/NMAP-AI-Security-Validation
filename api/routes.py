@@ -137,7 +137,7 @@ async def validate_batch(request: BatchValidationRequest):
 async def get_security_rules():
     """Get current security rules configuration."""
     rules = SecurityRules()
-    return {
+    return {    
         "forbidden_flags": rules.FORBIDDEN_FLAGS,
         "warning_flags": rules.WARNING_FLAGS,
         "unsafe_ranges": rules.UNSAFE_RANGES,
@@ -190,7 +190,7 @@ async def repair_command(query: UserQuery, candidate: CommandCandidate, result: 
     # If complexity or high risk, suggest simpler, more deterministic generator (SLM)
     if complexity_score >= 5 or getattr(result, "risk_level", None) in ["high", "critical"]:
         suggested_generation = "SLM"
-        generation_metadata["reason"] = "High complexity or risk; prefer simpler, more deterministic generation."
+        generation_metadata["reasonq"] = "High complexity or risk; prefer simpler, more deterministic generation."
     else:
         suggested_generation = "Diffusion"
         generation_metadata["reason"] = "Command repair straightforward; keep high-capacity generation."
