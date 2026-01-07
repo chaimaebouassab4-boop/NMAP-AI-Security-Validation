@@ -18,10 +18,9 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'utils'))
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-from error_mapping_logic import ErrorAnalyzer, CorrectionType
 from execution_simulator import ExecutionSimulator
 
-
+from .error_mapping_logic import ErrorAnalyzer, CorrectionType
 class FeedbackType(Enum):
     """Types of feedback to upstream agents"""
     COMPLEXITY_REDUCTION = "complexity_reduction"
@@ -259,15 +258,12 @@ class SelfCorrectionAgent:
                     # Test the repaired command
                     test_result = self._execute_command(repaired_cmd, simulate_only)
                     
-                    # Create attempt record
+                    # Create attempt record with errors_before
                     attempt = CorrectionAttempt(
                         attempt_number=1,
                         original_command=command,
                         corrected_command=repaired_cmd,
-                        errors_before=errors,
-                        errors_after=test_result.get("errors", []),
-                        repair_type=AutonomousRepairType(repair_result["repair_type"]),
-                        changes_made=repair_result["changes"]
+                        errors_before=errors
                     )
                     
                     # Check if repair was successful
@@ -294,11 +290,12 @@ class SelfCorrectionAgent:
             print(f"\n🔍 Attempt {attempt_num}/{self.max_attempts}")
             print(f"Testing: {current_command}")
             
-            # Create attempt record
+            # Create attempt record with errors_before vide au départ
             attempt = CorrectionAttempt(
                 attempt_number=attempt_num,
                 original_command=command if attempt_num == 1 else session.attempts[-1].corrected_command,
-                corrected_command=current_command
+                corrected_command=current_command,
+                errors_before=[]
             )
             
             # Execute/simulate command
@@ -389,11 +386,22 @@ class SelfCorrectionAgent:
         errors = exec_result.get("errors", [])
         critical_errors = [e for e in errors if e.get("severity") == "critical"]
         
-        return (
+        # Debug: Print what we got
+        print(f"\n[DEBUG] exec_result structure: {exec_result}")
+        print(f"[DEBUG] errors: {errors}")
+        print(f"[DEBUG] critical_errors: {critical_errors}")
+        print(f"[DEBUG] execution block: {exec_result.get('execution', {})}")
+        print(f"[DEBUG] exit_code: {exec_result.get('execution', {}).get('exit_code')}")
+        print(f"[DEBUG] completed: {exec_result.get('execution', {}).get('completed')}")
+        
+        success = (
             len(critical_errors) == 0 and
             exec_result.get("execution", {}).get("exit_code") == 0 and
             exec_result.get("execution", {}).get("completed", False)
         )
+        
+        print(f"[DEBUG] Success result: {success}\n")
+        return success
     
     def _generate_upstream_feedback(self, session: CorrectionSession, 
                                   last_result: Dict[str, Any],
@@ -616,7 +624,7 @@ def demo_self_correction():
     
     for i, test in enumerate(test_cases):
         print(f"\n\n{'='*70}")
-        print(f"📋 Test Case {i+1}: {test['description']}")
+        print(f"🔹 Test Case {i+1}: {test['description']}")
         print(f"{'='*70}")
         
         session = agent.correct_command(
@@ -636,12 +644,12 @@ def demo_self_correction():
         print(f"Source Agent: {report['session_summary']['source_agent']}")
         
         if session.final_command and session.final_command != test["command"]:
-            print(f"\n📝 Command Evolution:")
+            print(f"\n🔄 Command Evolution:")
             print(f"Original: {test['command']}")
             print(f"Final:    {session.final_command}")
         
         if session.feedback_generated:
-            print(f"\n📢 Feedback Generated:")
+            print(f"\n💬 Feedback Generated:")
             for feedback in session.feedback_generated:
                 print(f"- {feedback['type']}: {feedback.get('reason', 'N/A')}")
     

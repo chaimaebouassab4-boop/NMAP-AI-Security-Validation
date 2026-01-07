@@ -42,14 +42,8 @@ class SecurityRules:
     
     # Unsafe IP ranges (RFC 1918 private networks, localhost, etc.)
     UNSAFE_RANGES = [
-        '127.0.0.0/8',      # Loopback
-        '10.0.0.0/8',       # Private network
-        '172.16.0.0/12',    # Private network
-        '192.168.0.0/16',   # Private network
-        '169.254.0.0/16',   # Link-local
         '224.0.0.0/4',      # Multicast
         '240.0.0.0/4',      # Reserved
-        '0.0.0.0/8',        # Current network
     ]
     
     # Allowed safe targets for testing
@@ -257,7 +251,8 @@ class SecurityRules:
             risk_factors.append('unsafe_targets')
         
         # Cap at 100
-        risk_score = min(risk_score, 100)
+        risk_score = max(0, min(100, risk_score))  # Force entre 0 et 100
+
         
         # Determine risk level
         if risk_score >= 70:

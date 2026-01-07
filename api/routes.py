@@ -22,8 +22,7 @@ import logging
 
 from validation.validation_v2 import ValidationV2
 from validation.security_rules import SecurityRules
-from self_correction_agent import SelfCorrectionAgent
-
+from src.utils.agents.self_correction_agent import SelfCorrectionAgent
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -301,7 +300,7 @@ async def repair_command(request: RepairRequest, background_tasks: BackgroundTas
         
         logger.info(f"[{request.request_id}] Self-correction completed: success={session.success}")
         
-        # ====================================================================
+             # ====================================================================
         # Build Response Based on Repair Outcome
         # ====================================================================
         

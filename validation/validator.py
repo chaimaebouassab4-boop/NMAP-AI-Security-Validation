@@ -117,6 +117,7 @@ def validate_nmap_command(cmd: str, execute_real=False, timeout=60, apply_securi
         "targets": targets,
         "severity": "low"
     })
+    
 
     # ------------------------------------------------------------------
     # 8️⃣ Apply advanced security rules
@@ -151,7 +152,7 @@ def validate_nmap_command(cmd: str, execute_real=False, timeout=60, apply_securi
             ]
 
         response.update({
-            "risk_score": security["risk_score"],
+            "risk_score": max(0, min(100, security["risk_score"])),
             "risk_level": security["risk_level"],
             "recommendation": security["recommendation"]
         })
