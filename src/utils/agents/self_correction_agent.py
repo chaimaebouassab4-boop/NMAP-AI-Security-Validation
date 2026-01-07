@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Self-Correction Agent
-====================
-Implements the core self-correction loop with fix generation and feedback.
+Self-Correction Agent with Autonomous Repair
+==============================================
+Implements self-correction loop with autonomous repair for known issues.
 """
 
 import json
@@ -32,6 +32,15 @@ class FeedbackType(Enum):
     COMPLETE_REGENERATION = "complete_regeneration"
 
 
+class AutonomousRepairType(Enum):
+    """Types of autonomous repairs supported"""
+    PERMISSION_FIX = "permission_fix"           # -sS -> -sT
+    SYNTAX_FIX = "syntax_fix"                   # Port range correction
+    SCRIPT_WHITELIST = "script_whitelist"       # Replace dangerous scripts
+    TIMING_ADJUSTMENT = "timing_adjustment"     # Reduce aggressive timing
+    NO_FIX_AVAILABLE = "no_fix_available"
+
+
 @dataclass
 class CorrectionAttempt:
     """Record of a correction attempt"""
@@ -42,6 +51,7 @@ class CorrectionAttempt:
     errors_after: Optional[List[Dict[str, Any]]] = None
     success: bool = False
     changes_made: List[str] = field(default_factory=list)
+    repair_type: Optional[AutonomousRepairType] = None
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -54,13 +64,69 @@ class CorrectionSession:
     attempts: List[CorrectionAttempt] = field(default_factory=list)
     final_command: Optional[str] = None
     success: bool = False
+    is_autonomous_repair: bool = False
     feedback_generated: List[Dict[str, Any]] = field(default_factory=list)
     start_time: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     end_time: Optional[str] = None
 
 
 class SelfCorrectionAgent:
-    """Main self-correction agent with fix generation and feedback loop"""
+    """Main self-correction agent with autonomous repair capability"""
+    
+    # Known fixes mapping for autonomous repair
+    AUTONOMOUS_FIXES = {
+        "permission_denied": {
+            "description": "Permission error - switching to TCP Connect scan",
+            "repair_type": AutonomousRepairType.PERMISSION_FIX,
+            "fixes": [
+                {
+                    "pattern": r"-sS",  # SYN scan requires root
+                    "replacement": "-sT",  # Use TCP Connect scan instead
+                    "reason": "TCP Connect scan (-sT) doesn't require root privileges"
+                },
+                {
+                    "pattern": r"-sA",  # ACK scan requires root
+                    "replacement": "-sT",
+                    "reason": "TCP Connect scan (-sT) is safer alternative"
+                }
+            ]
+        },
+        "invalid_port_range": {
+            "description": "Invalid port range specification",
+            "repair_type": AutonomousRepairType.SYNTAX_FIX,
+            "fixes": [
+                {
+                    "pattern": r"-p\s+(\d+)-(\d+)",  # Match port range
+                    "check": lambda match: int(match.group(1)) > int(match.group(2)),
+                    "replacement_func": lambda match: f"-p {match.group(2)}-{match.group(1)}",
+                    "reason": "Reversed port range - correcting to ascending order"
+                }
+            ]
+        },
+        "dangerous_script": {
+            "description": "Using potentially dangerous NSE scripts",
+            "repair_type": AutonomousRepairType.SCRIPT_WHITELIST,
+            "dangerous_scripts": ["exploit", "brute-force", "malware"],
+            "fixes": [
+                {
+                    "pattern": r"--script\s+[^-\s]+",
+                    "replacement": "--script default",
+                    "reason": "Replacing unsafe scripts with default safe scripts"
+                }
+            ]
+        },
+        "timing_too_aggressive": {
+            "description": "Timing template is too aggressive",
+            "repair_type": AutonomousRepairType.TIMING_ADJUSTMENT,
+            "fixes": [
+                {
+                    "pattern": r"-T[45]",  # T4 or T5
+                    "replacement": "-T3",  # Moderate timing
+                    "reason": "Reducing timing from aggressive to moderate"
+                }
+            ]
+        }
+    }
     
     def __init__(self, max_attempts: int = 3):
         self.error_analyzer = ErrorAnalyzer()
@@ -68,15 +134,89 @@ class SelfCorrectionAgent:
         self.max_attempts = max_attempts
         self.sessions: List[CorrectionSession] = []
         
-    def correct_command(self, command: str, intent: str = "", 
-                       simulate_only: bool = True) -> CorrectionSession:
+    def attempt_autonomous_repair(self, command: str, 
+                                 error_type: str,
+                                 errors: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """
-        Main correction loop
+        Attempt autonomous repair based on known error types.
+        
+        Args:
+            command: The nmap command to repair
+            error_type: Type of error detected
+            errors: List of error details
+            
+        Returns:
+            Dict with repaired command and metadata, or None if no fix available
+        """
+        import re
+        
+        if error_type not in self.AUTONOMOUS_FIXES:
+            return None
+        
+        fix_config = self.AUTONOMOUS_FIXES[error_type]
+        repaired_command = command
+        changes_applied = []
+        
+        # Attempt each available fix
+        for fix in fix_config.get("fixes", []):
+            pattern = fix.get("pattern")
+            
+            # Check if we have a conditional check
+            if "check" in fix:
+                match = re.search(pattern, repaired_command)
+                if not match or not fix["check"](match):
+                    continue
+            
+            # Apply replacement
+            if "replacement_func" in fix:
+                repaired_command = re.sub(
+                    pattern,
+                    lambda m: fix["replacement_func"](m),
+                    repaired_command
+                )
+            else:
+                replacement = fix.get("replacement", "")
+                if re.search(pattern, repaired_command):
+                    repaired_command = re.sub(pattern, replacement, repaired_command)
+            
+            changes_applied.append(fix.get("reason", "Applied fix"))
+        
+        # Check for dangerous scripts
+        if error_type == "dangerous_script":
+            dangerous = fix_config.get("dangerous_scripts", [])
+            for script in dangerous:
+                if script in repaired_command:
+                    repaired_command = re.sub(
+                        r"--script\s+[^-\s]+",
+                        "--script default",
+                        repaired_command
+                    )
+                    changes_applied.append("Replaced dangerous script with default")
+                    break
+        
+        # Verify command was actually modified
+        if repaired_command == command and not changes_applied:
+            return None
+        
+        return {
+            "repaired_command": repaired_command,
+            "repair_type": fix_config["repair_type"].value,
+            "changes": changes_applied,
+            "description": fix_config["description"],
+            "original_error_type": error_type
+        }
+    
+    def correct_command(self, command: str, intent: str = "", 
+                       simulate_only: bool = True,
+                       validation_status: str = "Unknown") -> CorrectionSession:
+        """
+        Main correction loop with autonomous repair capability.
         
         Args:
             command: Nmap command to correct
             intent: Original user intent (for feedback generation)
             simulate_only: If True, simulate execution; if False, real execution
+            validation_status: Status from Validation Agent ("Repairable" or "Invalid")
             
         Returns:
             CorrectionSession with all attempts and results
@@ -89,13 +229,69 @@ class SelfCorrectionAgent:
         
         current_command = command
         
-        print(f"\n🔄 Starting Self-Correction Session: {session.session_id}")
+        print(f"\n🔬 Starting Self-Correction Session: {session.session_id}")
         print(f"Original Command: {command}")
         print(f"Intent: {intent or 'Not specified'}")
+        print(f"Validation Status: {validation_status}")
         print("=" * 60)
         
+        # AUTONOMOUS REPAIR ATTEMPT (First priority)
+        if validation_status == "Repairable":
+            print("\n🤖 Attempting Autonomous Repair...")
+            
+            # Execute original command to identify errors
+            exec_result = self._execute_command(command, simulate_only)
+            errors = exec_result.get("errors", [])
+            
+            if errors:
+                # Try to repair based on the first error type
+                error_type = errors[0].get("type", "")
+                repair_result = self.attempt_autonomous_repair(
+                    command, error_type, errors
+                )
+                
+                if repair_result:
+                    print(f"✅ Autonomous Repair Available!")
+                    print(f"Description: {repair_result['description']}")
+                    
+                    repaired_cmd = repair_result["repaired_command"]
+                    
+                    # Test the repaired command
+                    test_result = self._execute_command(repaired_cmd, simulate_only)
+                    
+                    # Create attempt record
+                    attempt = CorrectionAttempt(
+                        attempt_number=1,
+                        original_command=command,
+                        corrected_command=repaired_cmd,
+                        errors_before=errors,
+                        errors_after=test_result.get("errors", []),
+                        repair_type=AutonomousRepairType(repair_result["repair_type"]),
+                        changes_made=repair_result["changes"]
+                    )
+                    
+                    # Check if repair was successful
+                    if self._is_successful_execution(test_result):
+                        print("✅ Repaired command executed successfully!")
+                        attempt.success = True
+                        session.success = True
+                        session.is_autonomous_repair = True
+                        session.final_command = repaired_cmd
+                        session.attempts.append(attempt)
+                        session.end_time = datetime.utcnow().isoformat()
+                        self.sessions.append(session)
+                        return session
+                    else:
+                        # Repair improved but didn't fully fix - proceed to full correction
+                        print(f"⚠️  Repair partially successful ({len(test_result.get('errors', []))} errors remain)")
+                        session.attempts.append(attempt)
+                        current_command = repaired_cmd
+        
+        # ITERATIVE CORRECTION (Standard flow if autonomous repair fails)
+        print("\n🔧 Starting Iterative Correction Loop...")
+        
         for attempt_num in range(1, self.max_attempts + 1):
-            print(f"\n📍 Attempt {attempt_num}/{self.max_attempts}")
+            print(f"\n🔍 Attempt {attempt_num}/{self.max_attempts}")
             print(f"Testing: {current_command}")
             
             # Create attempt record
@@ -186,17 +382,10 @@ class SelfCorrectionAgent:
         if simulate:
             return self.execution_simulator.simulate_execution(command)
         else:
-            # Real execution would go here
-            # For now, we'll use simulation
             return self.execution_simulator.simulate_execution(command)
     
     def _is_successful_execution(self, exec_result: Dict[str, Any]) -> bool:
         """Determine if execution was successful"""
-        # Success criteria:
-        # 1. No critical errors
-        # 2. Exit code 0
-        # 3. Some output produced
-        
         errors = exec_result.get("errors", [])
         critical_errors = [e for e in errors if e.get("severity") == "critical"]
         
@@ -209,7 +398,7 @@ class SelfCorrectionAgent:
     def _generate_upstream_feedback(self, session: CorrectionSession, 
                                   last_result: Dict[str, Any],
                                   reason: str) -> Dict[str, Any]:
-        """Generate feedback for upstream agents"""
+        """Generate feedback for upstream agents (M3)"""
         feedback = {
             "type": FeedbackType.COMPLETE_REGENERATION.value,
             "session_id": session.session_id,
@@ -217,7 +406,8 @@ class SelfCorrectionAgent:
             "timestamp": datetime.utcnow().isoformat(),
             "attempts_made": len(session.attempts),
             "persistent_errors": [],
-            "recommendations": []
+            "recommendations": [],
+            "requires_m3_retry": True
         }
         
         # Analyze persistent errors
@@ -225,7 +415,6 @@ class SelfCorrectionAgent:
         for attempt in session.attempts:
             all_errors.extend(attempt.errors_before)
         
-        # Find errors that persist across attempts
         error_types = {}
         for error in all_errors:
             error_type = error.get("type", "unknown")
@@ -238,7 +427,7 @@ class SelfCorrectionAgent:
         
         feedback["persistent_errors"] = persistent_errors
         
-        # Generate specific recommendations
+        # Generate recommendations
         if "permission_denied" in persistent_errors:
             feedback["type"] = FeedbackType.PRIVILEGE_ESCALATION.value
             feedback["recommendations"].append({
@@ -280,12 +469,14 @@ class SelfCorrectionAgent:
             "session_id": session.session_id,
             "success": session.success,
             "total_attempts": len(session.attempts),
+            "is_autonomous_repair": session.is_autonomous_repair,
             "timestamp": datetime.utcnow().isoformat()
         }
         
         if session.success:
             feedback["final_command"] = session.final_command
             feedback["corrections_applied"] = []
+            feedback["source_agent"] = "SELF-CORR-AUTO" if session.is_autonomous_repair else "SELF-CORR-ITER"
             
             for attempt in session.attempts:
                 if attempt.changes_made:
@@ -295,6 +486,7 @@ class SelfCorrectionAgent:
                 "persistent_issues": self._analyze_persistent_issues(session),
                 "recommended_action": self._recommend_final_action(session)
             }
+            feedback["requires_m3_retry"] = True
         
         return feedback
     
@@ -302,7 +494,6 @@ class SelfCorrectionAgent:
         """Analyze issues that couldn't be resolved"""
         issues = []
         
-        # Check last attempt errors
         if session.attempts:
             last_attempt = session.attempts[-1]
             last_errors = last_attempt.errors_after or last_attempt.errors_before
@@ -317,7 +508,6 @@ class SelfCorrectionAgent:
         if not session.attempts:
             return "No attempts made - check initial command validity"
         
-        # Analyze failure patterns
         error_types = set()
         for attempt in session.attempts:
             for error in attempt.errors_before:
@@ -338,9 +528,11 @@ class SelfCorrectionAgent:
             "session_summary": {
                 "session_id": session.session_id,
                 "success": session.success,
+                "is_autonomous_repair": session.is_autonomous_repair,
                 "original_command": session.original_command,
                 "final_command": session.final_command,
                 "total_attempts": len(session.attempts),
+                "source_agent": "SELF-CORR-AUTO" if session.is_autonomous_repair else "SELF-CORR-ITER",
                 "duration": self._calculate_duration(session.start_time, session.end_time)
             },
             "attempts_detail": [],
@@ -352,18 +544,17 @@ class SelfCorrectionAgent:
             }
         }
         
-        # Detail each attempt
         for attempt in session.attempts:
             report["attempts_detail"].append({
                 "attempt": attempt.attempt_number,
                 "command": attempt.corrected_command,
                 "changes": attempt.changes_made,
+                "repair_type": attempt.repair_type.value if attempt.repair_type else None,
                 "errors_before": len(attempt.errors_before),
                 "errors_after": len(attempt.errors_after) if attempt.errors_after else 0,
                 "success": attempt.success
             })
         
-        # Calculate improvements
         if session.attempts:
             first_errors = len(session.attempts[0].errors_before)
             
@@ -394,73 +585,74 @@ class SelfCorrectionAgent:
 
 
 def demo_self_correction():
-    """Demonstrate self-correction agent"""
+    """Demonstrate self-correction agent with autonomous repair"""
     agent = SelfCorrectionAgent(max_attempts=3)
     
     test_cases = [
         {
             "command": "nmap -sS -p 80 scanme.nmap.org",
             "intent": "Perform stealth scan on port 80",
-            "description": "Permission error - should switch to -sT"
+            "validation_status": "Repairable",
+            "description": "Permission error - autonomous repair should switch to -sT"
         },
         {
-            "command": "nmap -p 80-70 --script exploit target.com",
-            "intent": "Scan ports and run exploit detection",
-            "description": "Multiple errors - port range and dangerous script"
+            "command": "nmap -p 80-70 --script default target.com",
+            "intent": "Scan ports and run basic scripts",
+            "validation_status": "Repairable",
+            "description": "Port range reversal - autonomous repair should fix"
         },
         {
-            "command": "nmap -T5 -p- -A unreachable.invalid",
-            "intent": "Comprehensive scan of target",
-            "description": "DNS and timing issues"
+            "command": "nmap -T5 -p- -A 192.168.1.1",
+            "intent": "Comprehensive scan with aggressive timing",
+            "validation_status": "Invalid",
+            "description": "Complex issues - should fall back to iterative correction"
         }
     ]
     
-    print("🤖 Self-Correction Agent Demo")
-    print("=" * 60)
+    print("🤖 Self-Correction Agent with Autonomous Repair Demo")
+    print("=" * 70)
     
     all_reports = []
     
     for i, test in enumerate(test_cases):
-        print(f"\n\n{'='*60}")
+        print(f"\n\n{'='*70}")
         print(f"📋 Test Case {i+1}: {test['description']}")
-        print(f"{'='*60}")
+        print(f"{'='*70}")
         
-        # Run correction
         session = agent.correct_command(
             command=test["command"],
             intent=test["intent"],
-            simulate_only=True
+            simulate_only=True,
+            validation_status=test["validation_status"]
         )
         
-        # Generate report
         report = agent.generate_report(session)
         all_reports.append(report)
         
-        # Display summary
         print(f"\n📊 Correction Summary:")
         print(f"Success: {'✅' if session.success else '❌'}")
+        print(f"Autonomous Repair: {'✅' if session.is_autonomous_repair else '❌'}")
         print(f"Attempts: {len(session.attempts)}")
+        print(f"Source Agent: {report['session_summary']['source_agent']}")
         
         if session.final_command and session.final_command != test["command"]:
-            print(f"\n🔄 Command Evolution:")
+            print(f"\n📝 Command Evolution:")
             print(f"Original: {test['command']}")
             print(f"Final:    {session.final_command}")
         
         if session.feedback_generated:
-            print(f"\n📨 Feedback Generated:")
+            print(f"\n📢 Feedback Generated:")
             for feedback in session.feedback_generated:
                 print(f"- {feedback['type']}: {feedback.get('reason', 'N/A')}")
-                for rec in feedback.get('recommendations', []):
-                    print(f"  • {rec['suggestion']}")
     
-    # Save all reports
+    # Save reports
     os.makedirs("results", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"self_correction_demo_{timestamp}.json"
     
     with open(f"results/{filename}", 'w') as f:
         json.dump({
-            "demo": "Self-Correction Agent",
+            "demo": "Self-Correction Agent with Autonomous Repair",
             "timestamp": datetime.utcnow().isoformat(),
             "test_cases": test_cases,
             "reports": all_reports
