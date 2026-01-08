@@ -187,7 +187,7 @@ class ValidationScorer:
         
         return recommendations
     
-    def create_json_score(self, validation_result: Dict) -> Dict[str, Any]:
+    def create_json_score(self, validation_result: Dict) -> Dict:
         """
         Create comprehensive JSON scoring output.
         
@@ -223,20 +223,42 @@ class ValidationScorer:
             }
         }
         
+        # Add generator information if available
+        if 'generator_confidence' in validation_result:
+            json_score["generator"] = {
+                "source_agent": validation_result.get("source_agent", "unknown"),
+                "confidence": validation_result.get("generator_confidence", 0.0),
+                "auto_validated": validation_result.get("auto_validated", False)
+            }
+        
         # Add security analysis if available
         if 'security' in validation_result:
             security = validation_result['security']
             
-            # Scores
-            json_score['scores'] = self.calculate_scores(security)
+            # Calculate scores with base values
+            scores = self.calculate_scores(security)
+            
+            # Use the final risk_score (adjusted or not)
+            final_risk_score = validation_result.get("risk_score", 0)
+            scores['risk_score'] = final_risk_score
+            scores['safety_score'] = 100 - final_risk_score
+            scores['overall_score'] = 100 - final_risk_score
+            
+            json_score['scores'] = scores
             
             # Risk assessment
             json_score['risk_assessment'] = {
                 "level": validation_result.get('risk_level', 'unknown'),
-                "score": validation_result.get('risk_score', 0),
+                "score": final_risk_score,
                 "factors": security.get('risk_factors', []),
                 "recommendation": validation_result.get('recommendation', '')
             }
+            
+            # Add adjustment reason if auto validated
+            if validation_result.get("auto_validated", False):
+                json_score["risk_assessment"]["adjustment_reason"] = (
+                    "Risque abaissé automatiquement grâce à une haute confiance du générateur"
+                )
             
             # Compliance
             json_score['compliance'] = self.generate_compliance_info(security)

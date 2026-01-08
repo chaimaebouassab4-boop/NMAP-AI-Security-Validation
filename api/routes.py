@@ -6,28 +6,75 @@ FastAPI route handlers with autonomous repair capability for M5 (Self-Correction
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
-from .models import (
-    CommandCandidate, 
-    ValidationResult, 
-    UserQuery,
-    ValidationIssue,
-    BatchValidationRequest, 
-    BatchValidationResponse,
-    HealthResponse
-)
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 import os
 import logging
+import sys
 
-from validation.validation_v2 import ValidationV2
+# Ajouter le chemin racine au sys.path pour les imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# IMPORTS CORRECTS : Utiliser validator.py au lieu de validation_v2.py
+from validation.json_scorer import ValidationScorer
 from validation.security_rules import SecurityRules
-from src.utils.agents.self_correction_agent import SelfCorrectionAgent
+from validation.validator import validate_nmap_command, CommandCandidate, validate_batch_commands, get_validation_summary
+
+# Importer les modèles d'abord
+try:
+    from .models import (
+        ValidationResult,
+        UserQuery,
+        ValidationIssue,
+        BatchValidationRequest, 
+        BatchValidationResponse,
+        HealthResponse,
+        CommandCandidate as APICandidate  # Renommer pour éviter conflit
+    )
+except ImportError as e:
+    # Définir les modèles en ligne si l'import échoue
+    from pydantic import BaseModel as _BaseModel
+    class ValidationIssue(_BaseModel):
+        type: str
+        severity: str
+        message: str
+        suggestion: Optional[str] = None
+    
+    class ValidationResult(_BaseModel):
+        status: str
+        command: str
+        valid: bool
+        risk_score: float
+        risk_level: str
+        issues: List[ValidationIssue]
+        warnings: List[str]
+        recommendation: str
+    
+    class BatchValidationResponse(_BaseModel):
+        total: int
+        valid: int
+        invalid: int
+        results: List[ValidationResult]
+    
+    class HealthResponse(_BaseModel):
+        status: str
+        timestamp: str
+        version: str
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
 # NEW: Enhanced Models for Autonomous Repair
 # ============================================================================
+
+class CommandCandidateRequest(BaseModel):
+    """Request for command validation"""
+    command: str = Field(..., description="The Nmap command to validate")
+    confidence: Optional[float] = Field(0.0, description="Confidence score from generator (0.0-1.0)")
+    source_agent: Optional[str] = Field("unknown", description="Source agent that generated the command")
+    user_id: Optional[str] = Field(None, description="User identifier")
+    context: Optional[Dict[str, Any]] = Field(None, description="Additional context")
+    execute_real: Optional[bool] = Field(False, description="If True, actually execute the command")
 
 class RepairRequest(BaseModel):
     """Request for self-correction repair with validation context"""
@@ -58,6 +105,11 @@ class RepairResponse(BaseModel):
     repair_type: Optional[str] = Field(default=None, description="Type of repair if autonomous (permission_fix, syntax_fix, etc)")
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
+class CommandResponse(BaseModel):
+    """Response for command validation with detailed scoring"""
+    success: bool
+    data: Dict[str, Any]
+    metadata: Dict[str, Any]
 
 # ============================================================================
 # Router Setup
@@ -65,12 +117,15 @@ class RepairResponse(BaseModel):
 
 router = APIRouter()
 
-# Initialize validator
-validator = ValidationV2()
-
-# Initialize self-correction agent
-self_correction_agent = SelfCorrectionAgent(max_attempts=3)
-
+# Initialize self-correction agent conditionally
+try:
+    from src.utils.agents.self_correction_agent import SelfCorrectionAgent
+    self_correction_agent = SelfCorrectionAgent(max_attempts=3)
+    AUTO_REPAIR_ENABLED = True
+except ImportError:
+    logger.warning("SelfCorrectionAgent not available. Autonomous repair disabled.")
+    self_correction_agent = None
+    AUTO_REPAIR_ENABLED = False
 
 # ============================================================================
 # Conversion and Helper Functions
@@ -80,12 +135,14 @@ def convert_to_validation_result(internal_result: dict) -> ValidationResult:
     """Convert your internal validation result to API format."""
     
     issues = []
-    if internal_result.get('blocked_by_security') and 'security_issues' in internal_result:
-        for issue_text in internal_result['security_issues']:
-            if "Forbidden flag" in issue_text:
+    
+    # Handle security issues
+    if internal_result.get('blocked_by_security') and internal_result.get('issues'):
+        for issue_text in internal_result['issues']:
+            if "Forbidden flag" in str(issue_text):
                 issue_type = "forbidden_flag"
                 severity = "critical"
-            elif "Unsafe target" in issue_text:
+            elif "Unsafe target" in str(issue_text):
                 issue_type = "unsafe_target"
                 severity = "high"
             else:
@@ -95,39 +152,48 @@ def convert_to_validation_result(internal_result: dict) -> ValidationResult:
             issues.append(ValidationIssue(
                 type=issue_type,
                 severity=severity,
-                message=issue_text,
+                message=str(issue_text),
                 suggestion=None
             ))
     
+    # Handle syntax errors
     if not internal_result.get('valid') and not internal_result.get('blocked_by_security'):
+        error_msg = internal_result.get('error', 'Unknown validation error')
         issues.append(ValidationIssue(
             type="syntax_error",
             severity=internal_result.get('severity', 'high'),
-            message=internal_result.get('error', 'Unknown validation error'),
+            message=error_msg,
             suggestion="Check command syntax"
         ))
     
-    status = "valid" if internal_result.get('valid') else "invalid"
-    if internal_result.get('valid') and internal_result.get('risk_level') in ['high', 'critical']:
-        status = "warning"
+    # Determine status
+    if internal_result.get('valid'):
+        if internal_result.get('risk_level') in ['high', 'critical']:
+            status = "warning"
+        else:
+            status = "valid"
+    else:
+        status = "invalid"
     
+    # Handle warnings
     warnings = []
     if internal_result.get('warnings'):
-        warnings = internal_result['warnings'] if isinstance(internal_result['warnings'], list) else [internal_result['warnings']]
+        if isinstance(internal_result['warnings'], list):
+            warnings = [str(w) for w in internal_result['warnings']]
+        else:
+            warnings = [str(internal_result['warnings'])]
     
-    # Get risk_score and risk_level from security analysis
-    risk_score = 0
-    risk_level = "unknown"
-    recommendation = "No recommendation"
+    # Get risk information
+    risk_score = internal_result.get('risk_score', 0)
+    risk_level = internal_result.get('risk_level', 'unknown')
+    recommendation = internal_result.get('recommendation', 'No recommendation')
     
+    # If security analysis is available, use it
     if 'security' in internal_result:
-        risk_score = internal_result['security'].get('risk_score', 0)
-        risk_level = internal_result['security'].get('risk_level', 'unknown')
-        recommendation = internal_result['security'].get('recommendation', 'No recommendation')
-    elif internal_result.get('risk_score') is not None:
-        risk_score = internal_result.get('risk_score', 0)
-        risk_level = internal_result.get('risk_level', 'unknown')
-        recommendation = internal_result.get('recommendation', 'No recommendation')
+        security = internal_result['security']
+        risk_score = security.get('risk_score', risk_score)
+        risk_level = security.get('risk_level', risk_level)
+        recommendation = security.get('recommendation', recommendation)
     
     return ValidationResult(
         status=status,
@@ -144,14 +210,16 @@ def convert_to_validation_result(internal_result: dict) -> ValidationResult:
 def _extract_all_changes(session) -> List[str]:
     """Extract all changes made across all repair attempts"""
     changes = []
-    for attempt in session.attempts:
-        changes.extend(attempt.changes_made)
+    if hasattr(session, 'attempts'):
+        for attempt in session.attempts:
+            if hasattr(attempt, 'changes_made'):
+                changes.extend(attempt.changes_made)
     return changes
 
 
 def _prepare_m3_feedback(session) -> Optional[Dict[str, Any]]:
     """Prepare feedback for M3 when repair fails"""
-    if not session.feedback_generated:
+    if not hasattr(session, 'feedback_generated') or not session.feedback_generated:
         return None
     
     feedback = session.feedback_generated[-1]
@@ -161,14 +229,14 @@ def _prepare_m3_feedback(session) -> Optional[Dict[str, Any]]:
         "requires_m3_retry": True,
         "recommendations": feedback.get("recommendations", []),
         "persistent_errors": feedback.get("persistent_errors", []),
-        "attempts_made": len(session.attempts)
+        "attempts_made": len(session.attempts) if hasattr(session, 'attempts') else 0
     }
 
 
 def _get_repair_type(session) -> Optional[str]:
     """Extract repair type from session if autonomous"""
-    if session.attempts and session.attempts[0].repair_type:
-        return session.attempts[0].repair_type.value
+    if hasattr(session, 'attempts') and session.attempts and hasattr(session.attempts[0], 'repair_type'):
+        return str(session.attempts[0].repair_type)
     return None
 
 
@@ -187,25 +255,84 @@ async def health_check():
     """Health check endpoint with autonomous repair status."""
     return HealthResponse(
         status="healthy",
-        version="2.1.0",  # Updated version with autonomous repair
-        timestamp=datetime.utcnow().isoformat()
+        version="2.1.0",
+        timestamp=datetime.utcnow().isoformat(),
+        features={
+            "autonomous_repair": AUTO_REPAIR_ENABLED,
+            "validation": True,
+            "security_rules": True,
+            "scoring": True
+        }
     )
 
 
 # ============================================================================
-# Validation Endpoints (Unchanged)
+# Validation Endpoints
 # ============================================================================
 
-@router.post("/validate", response_model=ValidationResult)
-async def validate_command(candidate: CommandCandidate):
-    """Validate a single NMAP command (M4 - Validation Agent)."""
+@router.post("/validate", response_model=CommandResponse)
+async def validate_command(request: CommandCandidateRequest):
+    """Validate a single NMAP command with detailed scoring."""
     try:
-        internal_result = validator.validate_single(
-            candidate.command,
-            execute=False,
-            return_json=False
+        logger.info(f"Validating command: {request.command}")
+        
+        # Create CommandCandidate object
+        candidate = CommandCandidate(
+            command=request.command,
+            confidence=request.confidence,
+            source_agent=request.source_agent
         )
+        
+        # Validate the command
+        internal_result = validate_nmap_command(
+            candidate,
+            execute_real=request.execute_real,
+            apply_security_rules=True
+        )
+        
+        # Generate JSON score
+        scorer = ValidationScorer()
+        json_score = scorer.create_json_score(internal_result)
+        
+        # Return the result
+        return CommandResponse(
+            success=True,
+            data=json_score,
+            metadata={
+                "validation_time": datetime.now().isoformat(),
+                "confidence": request.confidence,
+                "source_agent": request.source_agent,
+                "auto_validated": internal_result.get("auto_validated", False)
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Validation error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
+
+
+@router.post("/validate/legacy", response_model=ValidationResult)
+async def validate_command_legacy(request: CommandCandidateRequest):
+    """Legacy endpoint: Validate a single NMAP command (simple format)."""
+    try:
+        logger.info(f"Validating command (legacy): {request.command}")
+        
+        # Create CommandCandidate object
+        candidate = CommandCandidate(
+            command=request.command,
+            confidence=request.confidence,
+            source_agent=request.source_agent
+        )
+        
+        # Validate the command
+        internal_result = validate_nmap_command(
+            candidate,
+            execute_real=request.execute_real,
+            apply_security_rules=True
+        )
+        
         return convert_to_validation_result(internal_result)
+        
     except Exception as e:
         logger.error(f"Validation error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Validation error: {str(e)}")
@@ -215,21 +342,34 @@ async def validate_command(candidate: CommandCandidate):
 async def validate_batch(request: BatchValidationRequest):
     """Validate multiple NMAP commands."""
     try:
-        internal_results = validator.validate_multiple(
-            request.commands,
-            execute=False,
-            return_json=False
+        # Convert to CommandCandidate objects
+        candidates = []
+        for cmd_data in request.commands:
+            candidate = CommandCandidate(
+                command=cmd_data.command,
+                confidence=cmd_data.confidence or 0.0,
+                source_agent=cmd_data.source_agent or "unknown"
+            )
+            candidates.append(candidate)
+        
+        # Validate batch
+        results = validate_batch_commands(
+            candidates,
+            execute_real=False,
+            apply_security_rules=True
         )
         
-        results = [convert_to_validation_result(r) for r in internal_results['results']]
-        valid_count = sum(1 for r in results if r.valid)
+        # Convert results
+        validation_results = [convert_to_validation_result(r) for r in results]
+        valid_count = sum(1 for r in validation_results if r.valid)
         
         return BatchValidationResponse(
-            total=len(results),
+            total=len(validation_results),
             valid=valid_count,
-            invalid=len(results) - valid_count,
-            results=results
+            invalid=len(validation_results) - valid_count,
+            results=validation_results
         )
+        
     except Exception as e:
         logger.error(f"Batch validation error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Batch validation error: {str(e)}")
@@ -238,58 +378,39 @@ async def validate_batch(request: BatchValidationRequest):
 @router.get("/security/rules")
 async def get_security_rules():
     """Get current security rules configuration."""
-    rules = SecurityRules()
-    return {    
-        "forbidden_flags": rules.FORBIDDEN_FLAGS,
-        "warning_flags": rules.WARNING_FLAGS,
-        "unsafe_ranges": rules.UNSAFE_RANGES,
-        "safe_test_targets": rules.SAFE_TEST_TARGETS
-    }
+    try:
+        rules = SecurityRules()
+        return {
+            "forbidden_flags": rules.FORBIDDEN_FLAGS,
+            "warning_flags": rules.WARNING_FLAGS,
+            "unsafe_ranges": rules.UNSAFE_RANGES,
+            "safe_test_targets": rules.SAFE_TEST_TARGETS
+        }
+    except Exception as e:
+        logger.error(f"Error getting security rules: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================================
-# NEW: Enhanced Repair Endpoint with Autonomous Repair (M5 - Self-Correction)
+# Enhanced Repair Endpoint with Autonomous Repair (M5 - Self-Correction)
 # ============================================================================
 
 @router.post("/repair", response_model=RepairResponse)
 async def repair_command(request: RepairRequest, background_tasks: BackgroundTasks):
     """
     M5: Self-Correction Agent with Autonomous Repair
-    
-    Intelligently repairs commands based on validation feedback:
-    1. If status is "Repairable": Attempts autonomous repair first
-    2. If autonomous repair succeeds: Returns immediately (source_agent=SELF-CORR-AUTO)
-    3. If autonomous repair fails or status is "Invalid": Uses iterative correction
-    4. If iterative fails: Generates feedback for M3 (Generative Agent) to regenerate
-    
-    Args:
-        request: RepairRequest with command and validation context
-        background_tasks: For async logging
-        
-    Returns:
-        RepairResponse with repair results and routing information
     """
+    if not AUTO_REPAIR_ENABLED:
+        raise HTTPException(
+            status_code=501,
+            detail="Autonomous repair feature not available. SelfCorrectionAgent not found."
+        )
     
     logger.info(f"[{request.request_id}] Repair request received")
-    logger.debug(f"[{request.request_id}] Command: {request.command}")
-    logger.debug(f"[{request.request_id}] Validation Status: {request.validation_status}")
     
     try:
-        # Convert validation issues to error format for self-correction agent
-        errors = []
-        if request.issues:
-            for issue in request.issues:
-                if isinstance(issue, dict):
-                    errors.append(issue)
-                else:
-                    errors.append({
-                        "type": issue.type if hasattr(issue, 'type') else "unknown",
-                        "message": issue.message if hasattr(issue, 'message') else str(issue),
-                        "severity": issue.severity if hasattr(issue, 'severity') else "medium"
-                    })
-        
-        # Execute self-correction (attempts autonomous repair first, then iterative)
-        logger.info(f"[{request.request_id}] Starting self-correction with status: {request.validation_status}")
+        # Execute self-correction
+        logger.info(f"[{request.request_id}] Starting self-correction")
         
         session = self_correction_agent.correct_command(
             command=request.command,
@@ -300,12 +421,8 @@ async def repair_command(request: RepairRequest, background_tasks: BackgroundTas
         
         logger.info(f"[{request.request_id}] Self-correction completed: success={session.success}")
         
-             # ====================================================================
-        # Build Response Based on Repair Outcome
-        # ====================================================================
-        
+        # Build response based on outcome
         if session.success:
-            # Repair succeeded (either autonomous or iterative)
             source_agent = "SELF-CORR-AUTO" if session.is_autonomous_repair else "SELF-CORR-ITER"
             repair_type = _get_repair_type(session)
             
@@ -316,17 +433,15 @@ async def repair_command(request: RepairRequest, background_tasks: BackgroundTas
                 repaired_command=session.final_command,
                 source_agent=source_agent,
                 is_autonomous_repair=session.is_autonomous_repair,
-                attempts=len(session.attempts),
+                attempts=len(session.attempts) if hasattr(session, 'attempts') else 1,
                 changes_applied=_extract_all_changes(session),
-                feedback_for_m3=None,  # No feedback needed if successful
+                feedback_for_m3=None,
                 confidence=1.0,
                 repair_type=repair_type
             )
             
             logger.info(f"[{request.request_id}] ✅ Repair successful via {source_agent}")
-            logger.debug(f"[{request.request_id}] Repaired command: {session.final_command}")
             
-            # Log asynchronously (don't block response)
             background_tasks.add_task(
                 _log_repair_event,
                 request.request_id,
@@ -338,7 +453,7 @@ async def repair_command(request: RepairRequest, background_tasks: BackgroundTas
             return response
         
         else:
-            # Repair failed - generate feedback for M3
+            # Repair failed
             feedback = _prepare_m3_feedback(session)
             
             response = RepairResponse(
@@ -348,15 +463,14 @@ async def repair_command(request: RepairRequest, background_tasks: BackgroundTas
                 repaired_command=None,
                 source_agent="SELF-CORR-FAILED",
                 is_autonomous_repair=False,
-                attempts=len(session.attempts),
+                attempts=len(session.attempts) if hasattr(session, 'attempts') else 1,
                 changes_applied=_extract_all_changes(session),
                 feedback_for_m3=feedback,
                 confidence=0.0,
                 repair_type=None
             )
             
-            logger.warning(f"[{request.request_id}] ❌ Repair failed after {len(session.attempts)} attempts")
-            logger.warning(f"[{request.request_id}] Feedback for M3: {feedback.get('reason') if feedback else 'None'}")
+            logger.warning(f"[{request.request_id}] ❌ Repair failed after {len(session.attempts) if hasattr(session, 'attempts') else 1} attempts")
             
             background_tasks.add_task(
                 _log_repair_event,
@@ -377,126 +491,40 @@ async def repair_command(request: RepairRequest, background_tasks: BackgroundTas
 
 
 # ============================================================================
-# ORIGINAL: Repair Endpoint for Backward Compatibility
+# Statistics and Monitoring Endpoints
 # ============================================================================
-
-@router.post("/repair-legacy", response_model=CommandCandidate)
-async def repair_command_legacy(query: UserQuery, candidate: CommandCandidate, result: ValidationResult):
-    """
-    DEPRECATED: Original repair logic for backward compatibility.
-    New code should use /repair endpoint instead.
-    
-    Agent 7: Self-Correction logic (Legacy version).
-    Refines the command based on validation issues found in Step 4.
-    """
-    # Build a plain text view of issues
-    issue_text = " ".join([i.message for i in result.issues]) if result.issues else ""
-    new_command = candidate.command or ""
-
-    # Heuristic complexity scoring
-    tokens = new_command.split()
-    num_flags = sum(1 for t in tokens if t.startswith('-') and len(t) > 1)
-    has_pipes = '|' in new_command or ';' in new_command
-    long_command = len(tokens) > 10
-    complexity_score = num_flags + (2 if has_pipes else 0) + (1 if long_command else 0)
-
-    # Self-correction: Permission Error => switch scan type
-    if "Permission Error" in issue_text or "-sS" in new_command:
-        new_command = new_command.replace("-sS", "-sT")
-        repair_rationale = "Privilege issue detected. Switched to TCP Connect scan (-sT)."
-    else:
-        repair_rationale = f"Refined command to address: {issue_text or 'no specific issues'}"
-
-    # Decide whether to ask generator (M1/M3) to change strategy
-    suggested_generation = None
-    prev_agent = None
-    if candidate.context and isinstance(candidate.context, dict) and "previous_agent" in candidate.context:
-        prev_agent = candidate.context.get("previous_agent")
-    elif query and getattr(query, "metadata", None) and isinstance(query.metadata, dict) and "previous_agent" in query.metadata:
-        prev_agent = query.metadata.get("previous_agent")
-    else:
-        prev_agent = "DIFFUSION"
-
-    generation_metadata = {
-        "complexity_score": complexity_score,
-        "reason": None,
-        "previous_agent": prev_agent,
-        "risk_level": getattr(result, "risk_level", "unknown")
-    }
-
-    # If complexity or high risk, suggest simpler, more deterministic generator (SLM)
-    if complexity_score >= 5 or getattr(result, "risk_level", None) in ["high", "critical"]:
-        suggested_generation = "SLM"
-        generation_metadata["reason"] = "High complexity or risk; prefer simpler, more deterministic generation."
-    else:
-        suggested_generation = "Diffusion"
-        generation_metadata["reason"] = "Command repair straightforward; keep high-capacity generation."
-
-    return CommandCandidate(
-        command=new_command,
-        rationale=repair_rationale,
-        source_agent="SELF-CORR",
-        user_id=candidate.user_id,
-        context=candidate.context,
-        suggested_generation=suggested_generation,
-        generation_metadata=generation_metadata
-    )
-
-
-# ============================================================================
-# Session and Monitoring Endpoints
-# ============================================================================
-
-@router.get("/repair/session/{session_id}")
-async def get_repair_session(session_id: str):
-    """Retrieve a self-correction session report for debugging."""
-    try:
-        for session in self_correction_agent.sessions:
-            if session.session_id == session_id:
-                report = self_correction_agent.generate_report(session)
-                return report
-        
-        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving session {session_id}: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 @router.get("/stats")
 async def get_statistics():
-    """Get validation and repair statistics."""
+    """Get API statistics."""
     try:
-        validation_stats = validator.get_statistics()
-        
-        # Add repair statistics
-        repair_stats = {
-            "total_sessions": len(self_correction_agent.sessions),
-            "autonomous_repairs": sum(1 for s in self_correction_agent.sessions if s.is_autonomous_repair),
-            "iterative_repairs": sum(
-                1 for s in self_correction_agent.sessions 
-                if not s.is_autonomous_repair and s.success
-            ),
-            "failed_repairs": sum(1 for s in self_correction_agent.sessions if not s.success)
-        }
-        
-        # Calculate success rates
-        total_repairs = repair_stats["autonomous_repairs"] + repair_stats["iterative_repairs"] + repair_stats["failed_repairs"]
-        if total_repairs > 0:
-            repair_stats["success_rate"] = (
-                (repair_stats["autonomous_repairs"] + repair_stats["iterative_repairs"]) / total_repairs
-            )
-            repair_stats["autonomous_rate"] = repair_stats["autonomous_repairs"] / total_repairs
-        else:
-            repair_stats["success_rate"] = 0.0
-            repair_stats["autonomous_rate"] = 0.0
-        
-        return {
-            "validation": validation_stats,
-            "repair": repair_stats,
+        # Simple statistics for now
+        stats = {
+            "api_version": "2.1.0",
+            "features": {
+                "autonomous_repair": AUTO_REPAIR_ENABLED,
+                "confidence_based_validation": True,
+                "security_rules": True,
+                "json_scoring": True
+            },
             "timestamp": datetime.utcnow().isoformat()
         }
+        
+        # Add repair statistics if available
+        if AUTO_REPAIR_ENABLED:
+            repair_stats = {
+                "total_sessions": len(self_correction_agent.sessions),
+                "autonomous_repairs": sum(1 for s in self_correction_agent.sessions if s.is_autonomous_repair),
+                "iterative_repairs": sum(
+                    1 for s in self_correction_agent.sessions 
+                    if not s.is_autonomous_repair and s.success
+                ),
+                "failed_repairs": sum(1 for s in self_correction_agent.sessions if not s.success)
+            }
+            stats["repair"] = repair_stats
+        
+        return stats
+        
     except Exception as e:
         logger.warning(f"Error getting statistics: {str(e)}")
         return {
@@ -506,55 +534,73 @@ async def get_statistics():
         }
 
 
-# ============================================================================
-# Debugging and Admin Endpoints
-# ============================================================================
-
-@router.get("/repair/autonomous-fixes")
-async def get_autonomous_fixes():
-    """
-    Get list of supported autonomous repair types.
-    Useful for debugging and understanding what errors can be fixed automatically.
-    """
-    fixes_info = {}
-    
-    for error_type, fix_config in self_correction_agent.AUTONOMOUS_FIXES.items():
-        fixes_info[error_type] = {
-            "description": fix_config.get("description"),
-            "repair_type": fix_config.get("repair_type").value if fix_config.get("repair_type") else None,
-            "example": f"Error type '{error_type}' can be autonomously repaired"
+@router.get("/demo")
+async def demo_endpoint():
+    """Demo endpoint with example commands."""
+    examples = [
+        {
+            "command": "nmap -sV scanme.nmap.org",
+            "description": "Safe command with service detection",
+            "confidence": 0.95,
+            "source_agent": "AI_Agent_v1"
+        },
+        {
+            "command": "nmap -A 192.168.1.1",
+            "description": "Aggressive scan on local network (might be blocked)",
+            "confidence": 0.85,
+            "source_agent": "AI_Agent_v1"
+        },
+        {
+            "command": "nmap --script vuln 10.0.0.1",
+            "description": "Vulnerability scan on private IP (will be blocked)",
+            "confidence": 0.75,
+            "source_agent": "AI_Agent_v1"
         }
+    ]
     
     return {
-        "total_autonomous_fix_types": len(fixes_info),
-        "fixes": fixes_info,
-        "timestamp": datetime.utcnow().isoformat()
+        "examples": examples,
+        "endpoints": {
+            "validate": "POST /validate - Validate with detailed scoring",
+            "validate_legacy": "POST /validate/legacy - Simple validation",
+            "validate_batch": "POST /validate/batch - Batch validation",
+            "repair": "POST /repair - Autonomous repair",
+            "health": "GET /health - Health check",
+            "security_rules": "GET /security/rules - Security rules",
+            "stats": "GET /stats - Statistics"
+        }
     }
 
 
-@router.get("/repair/recent-sessions/{limit}")
-async def get_recent_sessions(limit: int = 10):
-    """Get recent self-correction sessions for monitoring."""
-    try:
-        recent = self_correction_agent.sessions[-limit:] if limit > 0 else self_correction_agent.sessions
-        
-        return {
-            "total_sessions": len(self_correction_agent.sessions),
-            "returned": len(recent),
-            "sessions": [
-                {
-                    "session_id": s.session_id,
-                    "success": s.success,
-                    "is_autonomous": s.is_autonomous_repair,
-                    "attempts": len(s.attempts),
-                    "original_command": s.original_command,
-                    "final_command": s.final_command,
-                    "start_time": s.start_time,
-                    "end_time": s.end_time
-                }
-                for s in recent
-            ]
-        }
-    except Exception as e:
-        logger.error(f"Error retrieving recent sessions: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+# ============================================================================
+# Root Endpoint
+# ============================================================================
+
+@router.get("/")
+async def root():
+    """Root endpoint with API information."""
+    return {
+        "name": "NMAP AI Security Validation API",
+        "version": "2.1.0",
+        "description": "AI-powered NMAP command validation with autonomous repair",
+        "author": "NMAP AI Security Team",
+        "features": [
+            "Command validation with security rules",
+            "Confidence-based risk adjustment",
+            "Autonomous repair capability",
+            "JSON scoring output",
+            "Batch processing"
+        ],
+        "endpoints": {
+            "/validate": "POST - Validate command with detailed scoring",
+            "/validate/legacy": "POST - Simple validation format",
+            "/validate/batch": "POST - Batch validation",
+            "/repair": "POST - Autonomous repair",
+            "/health": "GET - Health check",
+            "/security/rules": "GET - Security rules",
+            "/stats": "GET - Statistics",
+            "/demo": "GET - Demo examples",
+            "/docs": "GET - Interactive API documentation"
+        },
+        "status": "operational" if AUTO_REPAIR_ENABLED else "limited (no repair)"
+    }
